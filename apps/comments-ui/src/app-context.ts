@@ -25,7 +25,6 @@ export type Comment = {
     liked: boolean,
     count: {
         replies: number,
-        total_replies?: number,
         likes: number,
     },
     member: Member | null,
