@@ -770,6 +770,37 @@ describe(`Admin Comments API`, function () {
                 });
         });
 
+        it('includes deleted reply tombstones when they have visible descendants', async function () {
+            const root = await dbFns.addComment({
+                member_id: fixtureManager.get('members', 0).id,
+                html: 'Comment 1',
+                status: 'published'
+            });
+
+            const deletedReply = await dbFns.addComment({
+                member_id: fixtureManager.get('members', 0).id,
+                parent_id: root.get('id'),
+                html: 'Deleted reply',
+                status: 'deleted'
+            });
+
+            const hiddenReply = await dbFns.addComment({
+                member_id: fixtureManager.get('members', 0).id,
+                parent_id: root.get('id'),
+                in_reply_to_id: deletedReply.get('id'),
+                html: 'Hidden reply',
+                status: 'hidden'
+            });
+
+            const res = await adminApi.get('/comments/post/' + postId + '/');
+            const replies = res.body.comments[0].replies;
+
+            assert.deepEqual(replies.map(reply => reply.id), [deletedReply.get('id'), hiddenReply.get('id')]);
+            assert.equal(replies[0].html, null);
+            assert.equal(replies[1].html, 'Hidden reply');
+            assert.equal(replies[1].in_reply_to_id, deletedReply.get('id'));
+        });
+
         it('includes hidden replies but not deleted replies in count', async function () {
             await dbFns.addCommentWithReplies({
                 member_id: fixtureManager.get('members', 0).id,

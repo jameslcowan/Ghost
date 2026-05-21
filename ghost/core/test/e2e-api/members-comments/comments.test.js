@@ -766,6 +766,66 @@ describe('Comments API', function () {
                     assert.equal(result.body.comments[0].replies.length, 0);
                 });
 
+                it('includes deleted and hidden reply tombstones when they have published descendants', async function () {
+                    const root = await dbFns.addComment({
+                        member_id: fixtureManager.get('members', 0).id
+                    });
+
+                    const hiddenReply = await dbFns.addComment({
+                        member_id: fixtureManager.get('members', 1).id,
+                        parent_id: root.get('id'),
+                        status: 'hidden',
+                        html: '<p>This is hidden</p>'
+                    });
+
+                    const deletedReply = await dbFns.addComment({
+                        member_id: fixtureManager.get('members', 1).id,
+                        parent_id: root.get('id'),
+                        in_reply_to_id: hiddenReply.get('id'),
+                        status: 'deleted',
+                        html: '<p>This is deleted</p>'
+                    });
+
+                    const publishedReply = await dbFns.addComment({
+                        member_id: fixtureManager.get('members', 1).id,
+                        parent_id: root.get('id'),
+                        in_reply_to_id: deletedReply.get('id'),
+                        status: 'published',
+                        html: '<p>This is published</p>'
+                    });
+
+                    const result = await testGetComments(`/api/comments/post/${postId}/`, [commentMatcherWithReplies({replies: 3, commentMatcher: labsCommentMatcher})]);
+                    const replies = result.body.comments[0].replies;
+
+                    assert.deepEqual(replies.map(reply => reply.id), [hiddenReply.get('id'), deletedReply.get('id'), publishedReply.get('id')]);
+                    assert.equal(replies[0].html, null);
+                    assert.equal(replies[1].html, null);
+                    assert.equal(replies[2].html, '<p>This is published</p>');
+                    assert.equal(replies[2].in_reply_to_id, deletedReply.get('id'));
+                });
+
+                it('excludes deleted and hidden reply tombstones when they have no published descendants', async function () {
+                    const root = await dbFns.addComment({
+                        member_id: fixtureManager.get('members', 0).id
+                    });
+
+                    const hiddenReply = await dbFns.addComment({
+                        member_id: fixtureManager.get('members', 1).id,
+                        parent_id: root.get('id'),
+                        status: 'hidden'
+                    });
+
+                    await dbFns.addComment({
+                        member_id: fixtureManager.get('members', 1).id,
+                        parent_id: root.get('id'),
+                        in_reply_to_id: hiddenReply.get('id'),
+                        status: 'deleted'
+                    });
+
+                    const result = await testGetComments(`/api/comments/post/${postId}/`, [commentMatcherWithReplies({replies: 0, commentMatcher: labsCommentMatcher})]);
+                    assert.equal(result.body.comments[0].replies.length, 0);
+                });
+
                 it('doesn\'t count deleted or hidden comments in replies count', async function () {
                     await dbFns.addCommentWithReplies({
                         member_id: fixtureManager.get('members', 0).id,

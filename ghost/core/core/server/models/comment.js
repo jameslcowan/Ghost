@@ -7,6 +7,29 @@ const messages = {
     emptyComment: 'The body of a comment cannot be empty'
 };
 
+function getVisibleReplyAncestorsQuery(excludedStatuses) {
+    const statusPlaceholders = excludedStatuses.map(() => '?').join(',');
+
+    return ghostBookshelf.knex.raw(`
+        WITH RECURSIVE visible_reply_ancestors(id) AS (
+            SELECT in_reply_to_id
+            FROM comments
+            WHERE in_reply_to_id IS NOT NULL
+              AND status NOT IN (${statusPlaceholders})
+
+            UNION
+
+            SELECT comments.in_reply_to_id
+            FROM comments
+            INNER JOIN visible_reply_ancestors ON comments.id = visible_reply_ancestors.id
+            WHERE comments.in_reply_to_id IS NOT NULL
+        )
+
+        SELECT id
+        FROM visible_reply_ancestors
+    `, excludedStatuses);
+}
+
 /**
  * Remove empty paragraps from the start and end
  * + remove duplicate empty paragrapsh (only one empty line allowed)
@@ -176,15 +199,16 @@ const Comment = ghostBookshelf.Model.extend({
         // we want to apply filters when fetching replies so we don't expose data that should be hidden
         // - public requests never return hidden or deleted replies
         // - admin requests never return deleted replies but do return hidden replies
+        // - unpublished replies are returned as tombstones when they preserve the path to visible descendants
         const repliesOptionIndex = withRelated.indexOf('replies');
         if (repliesOptionIndex > -1) {
+            const excludedStatuses = isAdmin ? ['deleted'] : ['hidden', 'deleted'];
             withRelated[repliesOptionIndex] = {
                 replies: (qb) => {
-                    if (isAdmin) {
-                        qb.where('status', '!=', 'deleted');
-                    } else {
-                        qb.where('status', 'published');
-                    }
+                    qb.where(function () {
+                        this.whereNotIn('comments.status', excludedStatuses)
+                            .orWhereIn('comments.id', getVisibleReplyAncestorsQuery(excludedStatuses));
+                    });
                 }
             };
         }
