@@ -1,3 +1,4 @@
+const assert = require('node:assert/strict');
 const sinon = require('sinon');
 
 const StartAutomationsPollEvent = require('../../../../../core/server/services/automations/events/start-automations-poll-event');
@@ -44,13 +45,17 @@ describe('automations service', function () {
 
         it('subscribes to StartAutomationsPollEvent', function () {
             automations.init(initOptions);
-            sinon.assert.calledOnceWithExactly(domainEvents.subscribe, StartAutomationsPollEvent, sinon.match.func);
+            sinon.assert.calledTwice(domainEvents.subscribe);
+            assert.equal(domainEvents.subscribe.firstCall.args[0], StartAutomationsPollEvent);
+            assert.equal(typeof domainEvents.subscribe.firstCall.args[1], 'function');
+            assert.equal(domainEvents.subscribe.secondCall.args[0], StartAutomationsPollEvent);
+            assert.equal(typeof domainEvents.subscribe.secondCall.args[1], 'function');
         });
 
-        it('subscribes only once when init is called multiple times', function () {
+        it('subscribes each poller only once when init is called multiple times', function () {
             automations.init(initOptions);
             automations.init(initOptions);
-            sinon.assert.calledOnce(domainEvents.subscribe);
+            sinon.assert.calledTwice(domainEvents.subscribe);
         });
     });
 
