@@ -365,6 +365,16 @@ describe('Update Check', function () {
 
             const notificationsAPIAddStub = sinon.stub().resolves();
             const sendEmailStub = sinon.stub().resolves();
+            const path = require('path');
+            const EmailContentGenerator = require('../../../../core/server/services/lib/email-content-generator');
+            const generator = new EmailContentGenerator({
+                getSiteUrl: () => 'http://127.0.0.1:2369',
+                getSiteTitle: () => 'Test',
+                templatesDir: path.resolve(
+                    __dirname, '..', '..', '..', '..',
+                    'core', 'server', 'services', 'mail', 'templates'
+                )
+            });
 
             const updateCheckService = new UpdateCheckService({
                 api: {
@@ -396,16 +406,20 @@ describe('Update Check', function () {
                     ghostVersion: '0.8.0'
                 },
                 request: request,
-                sendEmail: sendEmailStub
+                sendEmail: sendEmailStub,
+                generateEmailContent: generator.getContent.bind(generator)
             });
 
             await updateCheckService.check();
 
             sinon.assert.called(sendEmailStub);
             assert.equal(sendEmailStub.args[0][0].to, 'jbloggs@example.com');
-            assert.equal(sendEmailStub.args[0][0].subject, 'Action required: Critical alert from Ghost instance http://127.0.0.1:2369');
-            assert.equal(sendEmailStub.args[0][0].html, '<p>Critical message. Upgrade your site!</p>');
-            assert.equal(sendEmailStub.args[0][0].forceTextContent, true);
+            assert.equal(sendEmailStub.args[0][0].subject, 'Ghost notification from http://127.0.0.1:2369');
+            // The wire HTML is sanitized and rendered into the notification shell;
+            // it is no longer sent as the entire body and no longer forced to plaintext.
+            assert.match(sendEmailStub.args[0][0].html, /<!doctype html/i);
+            assert.match(sendEmailStub.args[0][0].html, /Critical message\. Upgrade your site!/);
+            assert.equal(sendEmailStub.args[0][0].forceTextContent, undefined);
 
             sinon.assert.calledOnce(notificationsAPIAddStub);
             assert.equal(notificationsAPIAddStub.args[0][0].notifications.length, 1);

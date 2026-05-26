@@ -8,6 +8,7 @@ const tpl = require('@tryghost/tpl');
 const errors = require('@tryghost/errors');
 const logging = require('@tryghost/logging');
 const debug = require('@tryghost/debug')('update-check');
+const {sendAlertEmail} = require('./alert-email');
 
 const internal = {context: {internal: true}};
 
@@ -51,13 +52,15 @@ class UpdateCheckService {
      * @param {string} options.config.ghostVersion - Ghost instance version
      * @param {Function} options.request - a HTTP request proxy function
      * @param {Function} options.sendEmail - function handling sending an email
+     * @param {Function} options.generateEmailContent - function that renders an email template to {html, text}
     */
-    constructor({api, config, request, sendEmail}) {
+    constructor({api, config, request, sendEmail, generateEmailContent}) {
         this.api = api;
         this.config = config;
         this.logging = logging;
         this.request = request;
         this.sendEmail = sendEmail;
+        this.generateEmailContent = generateEmailContent;
     }
 
     nextCheckTimestamp() {
@@ -315,17 +318,24 @@ class UpdateCheckService {
         }
 
         debug(`creating custom notifications for ${notification.messages.length} notifications`);
-        const {users} = await this.api.users.browse(Object.assign({
-            limit: 'all',
-            include: ['roles'],
-            filter: 'status:active'
-        }, internal));
-
-        const adminEmails = users
-            .filter(user => ['Owner', 'Administrator'].includes(user.roles[0].name))
-            .map(user => user.email);
 
         const siteUrl = this.config.siteUrl;
+        let cachedAdminEmails;
+        const getAdminEmails = async () => {
+            if (cachedAdminEmails) {
+                return cachedAdminEmails;
+            }
+            const {users} = await this.api.users.browse(Object.assign({
+                limit: 'all',
+                include: ['roles'],
+                filter: 'status:active'
+            }, internal));
+            cachedAdminEmails = users
+                .filter(user => user?.roles?.some(role => ['Owner', 'Administrator'].includes(role.name)))
+                .map(user => user.email)
+                .filter(Boolean);
+            return cachedAdminEmails;
+        };
 
         for (const message of notification.messages) {
             const toAdd = {
@@ -340,14 +350,20 @@ class UpdateCheckService {
             };
 
             if (toAdd.type === 'alert') {
+                const adminEmails = await getAdminEmails();
                 for (const email of adminEmails) {
                     try {
-                        this.sendEmail({
-                            to: email,
-                            subject: `Action required: Critical alert from Ghost instance ${siteUrl}`,
-                            html: toAdd.message,
-                            forceTextContent: true
-                        });
+                        await sendAlertEmail(
+                            {
+                                sendEmail: this.sendEmail,
+                                generateEmailContent: this.generateEmailContent
+                            },
+                            {
+                                to: email,
+                                messageHtml: toAdd.message,
+                                siteUrl
+                            }
+                        );
                     } catch (err) {
                         this.logging.error(err);
                         if (this.config.rethrowErrors) {
