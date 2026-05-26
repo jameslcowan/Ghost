@@ -7,27 +7,46 @@ const messages = {
     emptyComment: 'The body of a comment cannot be empty'
 };
 
-function getVisibleReplyAncestorsQuery(excludedStatuses) {
+function getDisplayableCommentIdsSql(excludedStatuses, {parentId} = {}) {
     const statusPlaceholders = excludedStatuses.map(() => '?').join(',');
+    const parentFilter = parentId ? 'AND comments.parent_id = ?' : '';
+    const parentBindings = parentId ? [parentId] : [];
 
-    return ghostBookshelf.knex.raw(`
-        WITH RECURSIVE visible_reply_ancestors(id) AS (
-            SELECT in_reply_to_id
+    return {
+        sql: `
+        WITH RECURSIVE displayable_comment_paths(visible_id, comment_id) AS (
+            SELECT comments.id, comments.id
             FROM comments
-            WHERE in_reply_to_id IS NOT NULL
-              AND status NOT IN (${statusPlaceholders})
+            WHERE comments.status NOT IN (${statusPlaceholders})
+              ${parentFilter}
 
             UNION
 
-            SELECT comments.in_reply_to_id
+            SELECT displayable_comment_paths.visible_id,
+                CASE
+                    WHEN comments.in_reply_to_id IS NOT NULL THEN comments.in_reply_to_id
+                    ELSE comments.parent_id
+                END
             FROM comments
-            INNER JOIN visible_reply_ancestors ON comments.id = visible_reply_ancestors.id
-            WHERE comments.in_reply_to_id IS NOT NULL
+            INNER JOIN displayable_comment_paths ON comments.id = displayable_comment_paths.comment_id
+            WHERE (comments.in_reply_to_id IS NOT NULL OR comments.parent_id IS NOT NULL)
+              ${parentFilter ? 'AND comments.parent_id = ?' : ''}
         )
 
-        SELECT id
-        FROM visible_reply_ancestors
-    `, excludedStatuses);
+        SELECT comment_id AS id
+        FROM displayable_comment_paths
+        WHERE comment_id IS NOT NULL
+        GROUP BY comment_id
+        HAVING COUNT(DISTINCT visible_id) > 0
+        `,
+        bindings: [...excludedStatuses, ...parentBindings, ...parentBindings]
+    };
+}
+
+function getDisplayableCommentIdsQuery(excludedStatuses, options) {
+    const {sql, bindings} = getDisplayableCommentIdsSql(excludedStatuses, options);
+
+    return ghostBookshelf.knex.raw(sql, bindings);
 }
 
 /**
@@ -87,16 +106,8 @@ const Comment = ghostBookshelf.Model.extend({
                 // Browse All: simply exclude statuses, no thread structure preservation
                 qb.whereNotIn('comments.status', excludedStatuses);
             } else {
-                // Default: preserve thread structure by including deleted parents with replies
-                qb.where(function () {
-                    this.whereNotIn('comments.status', excludedStatuses)
-                        .orWhereExists(function () {
-                            this.select(1)
-                                .from('comments as replies')
-                                .whereRaw('replies.parent_id = comments.id')
-                                .whereNotIn('replies.status', excludedStatuses);
-                        });
-                });
+                // Default: preserve thread structure by including tombstones with visible descendants
+                qb.whereIn('comments.id', getDisplayableCommentIdsQuery(excludedStatuses, {parentId: options.parentId}));
             }
 
             // Filter by report count (extracted from filter in controller)
@@ -205,10 +216,7 @@ const Comment = ghostBookshelf.Model.extend({
             const excludedStatuses = isAdmin ? ['deleted'] : ['hidden', 'deleted'];
             withRelated[repliesOptionIndex] = {
                 replies: (qb) => {
-                    qb.where(function () {
-                        this.whereNotIn('comments.status', excludedStatuses)
-                            .orWhereIn('comments.id', getVisibleReplyAncestorsQuery(excludedStatuses));
-                    });
+                    qb.whereIn('comments.id', getDisplayableCommentIdsQuery(excludedStatuses));
                 }
             };
         }
@@ -305,18 +313,19 @@ const Comment = ghostBookshelf.Model.extend({
         return {
             replies(modelOrCollection, options) {
                 const excludedCommentStatuses = options.isAdmin ? ['deleted'] : ['hidden', 'deleted'];
+                const displayableCommentIds = getDisplayableCommentIdsSql(excludedCommentStatuses);
 
                 modelOrCollection.query('columns', 'comments.*', (qb) => {
                     qb.count('r.id')
                         .from('comments AS r')
                         .whereRaw('r.parent_id = comments.id')
-                        .whereNotIn('r.status', excludedCommentStatuses)
+                        .whereRaw(`r.id IN (${displayableCommentIds.sql})`, displayableCommentIds.bindings)
                         .as('count__replies');
                 });
             },
             direct_replies(modelOrCollection, options) {
                 const excludedCommentStatuses = options.isAdmin ? ['deleted'] : ['hidden', 'deleted'];
-                const statusPlaceholders = excludedCommentStatuses.map(() => '?').join(',');
+                const displayableCommentIds = getDisplayableCommentIdsSql(excludedCommentStatuses);
 
                 // Split into two separate indexed subqueries instead of a single OR-based query.
                 // An OR between parent_id and in_reply_to_id defeats MySQL index usage,
@@ -325,12 +334,12 @@ const Comment = ghostBookshelf.Model.extend({
                     (SELECT COUNT(*) FROM comments AS r1
                      WHERE r1.parent_id = comments.id
                        AND r1.in_reply_to_id IS NULL
-                       AND r1.status NOT IN (${statusPlaceholders}))
+                       AND r1.id IN (${displayableCommentIds.sql}))
                     +
                     (SELECT COUNT(*) FROM comments AS r2
                      WHERE r2.in_reply_to_id = comments.id
-                       AND r2.status NOT IN (${statusPlaceholders}))
-                ) as count__direct_replies`, [...excludedCommentStatuses, ...excludedCommentStatuses]));
+                       AND r2.id IN (${displayableCommentIds.sql}))
+                ) as count__direct_replies`, [...displayableCommentIds.bindings, ...displayableCommentIds.bindings]));
             },
             likes(modelOrCollection) {
                 modelOrCollection.query('columns', 'comments.*', (qb) => {

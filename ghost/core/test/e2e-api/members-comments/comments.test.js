@@ -794,14 +794,22 @@ describe('Comments API', function () {
                         html: '<p>This is published</p>'
                     });
 
-                    const result = await testGetComments(`/api/comments/post/${postId}/`, [commentMatcherWithReplies({replies: 3, commentMatcher: labsCommentMatcher})]);
+                    const result = await membersAgent
+                        .get(`/api/comments/post/${postId}/`)
+                        .expectStatus(200);
                     const replies = result.body.comments[0].replies;
 
+                    assert.equal(result.body.comments.length, 1);
+                    assert.equal(replies.length, 3);
                     assert.deepEqual(replies.map(reply => reply.id), [hiddenReply.get('id'), deletedReply.get('id'), publishedReply.get('id')]);
                     assert.equal(replies[0].html, null);
                     assert.equal(replies[1].html, null);
                     assert.equal(replies[2].html, '<p>This is published</p>');
                     assert.equal(replies[2].in_reply_to_id, deletedReply.get('id'));
+                    assert.equal(result.body.comments[0].count.replies, 3);
+                    assert.equal(result.body.comments[0].count.direct_replies, 1);
+                    assert.equal(replies[0].count.direct_replies, 1);
+                    assert.equal(replies[1].count.direct_replies, 1);
                 });
 
                 it('excludes deleted and hidden reply tombstones when they have no published descendants', async function () {
@@ -1240,6 +1248,88 @@ describe('Comments API', function () {
                 assert.equal(result.body.comments[0].count.replies, 2);
                 // count.direct_replies = direct replies excluding hidden/deleted: only replyA
                 assert.equal(result.body.comments[0].count.direct_replies, 1);
+            });
+
+            it('reply endpoint includes deleted and hidden tombstones when they have published descendants', async function () {
+                const member0 = fixtureManager.get('members', 0).id;
+                const member1 = fixtureManager.get('members', 1).id;
+
+                const root = await dbFns.addComment({
+                    member_id: member0,
+                    html: '<p>Root</p>'
+                });
+
+                const hiddenReply = await dbFns.addComment({
+                    member_id: member1,
+                    parent_id: root.get('id'),
+                    status: 'hidden',
+                    html: '<p>Hidden reply</p>'
+                });
+
+                const deletedReply = await dbFns.addComment({
+                    member_id: member1,
+                    parent_id: root.get('id'),
+                    in_reply_to_id: hiddenReply.get('id'),
+                    status: 'deleted',
+                    html: '<p>Deleted reply</p>'
+                });
+
+                const publishedReply = await dbFns.addComment({
+                    member_id: member1,
+                    parent_id: root.get('id'),
+                    in_reply_to_id: deletedReply.get('id'),
+                    status: 'published',
+                    html: '<p>Published reply</p>'
+                });
+
+                const result = await membersAgent.get(`/api/comments/${root.get('id')}/replies/`);
+                const replies = result.body.comments;
+
+                assert.deepEqual(replies.map(reply => reply.id), [hiddenReply.get('id'), deletedReply.get('id'), publishedReply.get('id')]);
+                assert.equal(replies[0].html, null);
+                assert.equal(replies[1].html, null);
+                assert.equal(replies[2].html, '<p>Published reply</p>');
+                assert.equal(replies[0].count.direct_replies, 1);
+                assert.equal(replies[1].count.direct_replies, 1);
+                assert.equal(result.body.meta.pagination.total, 3);
+            });
+
+            it('reply endpoint excludes deleted and hidden leaf replies while keeping published siblings', async function () {
+                const member0 = fixtureManager.get('members', 0).id;
+                const member1 = fixtureManager.get('members', 1).id;
+
+                const root = await dbFns.addComment({
+                    member_id: member0,
+                    html: '<p>Root</p>'
+                });
+
+                await dbFns.addComment({
+                    member_id: member1,
+                    parent_id: root.get('id'),
+                    status: 'hidden',
+                    html: '<p>Hidden reply</p>'
+                });
+
+                await dbFns.addComment({
+                    member_id: member1,
+                    parent_id: root.get('id'),
+                    status: 'deleted',
+                    html: '<p>Deleted reply</p>'
+                });
+
+                const publishedReply = await dbFns.addComment({
+                    member_id: member1,
+                    parent_id: root.get('id'),
+                    status: 'published',
+                    html: '<p>Published reply</p>'
+                });
+
+                const result = await membersAgent.get(`/api/comments/${root.get('id')}/replies/`);
+                const replies = result.body.comments;
+
+                assert.deepEqual(replies.map(reply => reply.id), [publishedReply.get('id')]);
+                assert.equal(replies[0].html, '<p>Published reply</p>');
+                assert.equal(result.body.meta.pagination.total, 1);
             });
 
             it('Can reply to a comment with www domain', async function () {
